@@ -20,6 +20,10 @@ $RECYCLE.BIN/
 *~
 .history/
 
+# Claude Code (per-machine config, not for repo)
+.claude/
+CLAUDE.local.md
+
 # Project temp / outputs
 _test_output/
 out/
