@@ -84,18 +84,18 @@ sudo apt install nodejs ffmpeg
 
 ```powershell
 # Windows PowerShell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/REPO_OWNER/MusicForDance/main/index.js" -OutFile "index.js"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bivlked/MusicForDance/main/index.js" -OutFile "index.js"
 ```
 
 ```bash
 # macOS / Linux
-curl -O https://raw.githubusercontent.com/REPO_OWNER/MusicForDance/main/index.js
+curl -O https://raw.githubusercontent.com/bivlked/MusicForDance/main/index.js
 ```
 
 Или клонировать весь репозиторий:
 
 ```bash
-git clone https://github.com/REPO_OWNER/MusicForDance.git
+git clone https://github.com/bivlked/MusicForDance.git
 cd MusicForDance
 ```
 
