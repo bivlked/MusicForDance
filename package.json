@@ -1,0 +1,38 @@
+{
+  "name": "music-for-dance",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CLI-инструмент для подготовки танцевальных треков: добавляет обратный отсчёт тиков перед музыкой и создаёт замедленные версии (0.9× / 0.8× / 0.7×) с сохранением высоты тона.",
+  "keywords": [
+    "audio",
+    "dance",
+    "countdown",
+    "time-stretching",
+    "pitch-preservation",
+    "ffmpeg",
+    "rubberband",
+    "wav",
+    "mp3",
+    "cli"
+  ],
+  "main": "index.js",
+  "bin": {
+    "music-for-dance": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "help": "node index.js --help",
+    "check": "node --check index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/REPO_OWNER/MusicForDance.git"
+  },
+  "bugs": {
+    "url": "https://github.com/REPO_OWNER/MusicForDance/issues"
+  }
+}
