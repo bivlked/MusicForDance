@@ -165,6 +165,8 @@ node index.js --help
 | AAC 256 kbps (M4A)        | AAC 256 kbps (M4A)              |
 | FLAC 24-bit               | FLAC 24-bit                     |
 | FLAC 16-bit               | FLAC 16-bit                     |
+| WAV PCM 32-bit            | WAV PCM 32-bit                  |
+| WAV PCM 32-bit float      | WAV PCM 32-bit float            |
 | WAV PCM 24-bit            | WAV PCM 24-bit                  |
 | WAV PCM 16-bit            | WAV PCM 16-bit                  |
 | Opus                      | Opus (bitrate из источника)     |

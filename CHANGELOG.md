@@ -5,6 +5,52 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 проект следует [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+## [1.0.1] — 2026-05-01
+
+Patch-релиз: исправления находок code-аудита от 2026-04-30 + smoke-тест.
+
+### Исправлено
+- **FLAC/ALAC bit-depth теперь гарантированно соответствует источнику.**
+  Раньше `buildOutput()` не передавал `-sample_fmt`, и encoder выбирал формат
+  сам — лейбл «FLAC 24-bit» мог не соответствовать реальному выходу. Теперь
+  для FLAC 24-bit передаётся `-sample_fmt s32 -bits_per_raw_sample 24` (это
+  единственный валидный способ хранить 24-bit в FLAC: формата `s24` в ffmpeg
+  нет). Для ALAC используются planar форматы (`s16p` / `s32p`).
+- **Bitrate для AAC/M4A с VBR теперь читается корректно.**
+  `probe()` дополнительно запрашивает `format=bit_rate` через `-of json`
+  и использует chain `streamBitRate → formatBitRate → default`. Раньше для
+  VBR AAC, у которого stream `bit_rate=N/A`, происходил silent fallback
+  на дефолт 192k. При попадании на format-fallback теперь печатается
+  предупреждение `⚠ Bitrate из контейнера (stream=N/A): Nk`.
+- **SIGINT теперь корректно убивает дочерний ffmpeg и удаляет временный
+  intro-файл.** Раньше `process.exit(130)` срабатывал сразу — ffmpeg-процесс
+  оставался зомби, временный WAV в `os.tmpdir()` не удалялся. Теперь handler
+  посылает `SIGTERM`, ждёт `child.once('close')` (с 2-секундным watchdog
+  на `SIGKILL`), очищает temp-файл и только потом завершает процесс.
+- **`pcm_f32le` источник больше не квантизируется silently в `pcm_s32le`.**
+  `pcmCodecForBits(bits, isFloat)` принимает дополнительный флаг и для
+  32-bit float возвращает `pcm_f32le`. Лейбл выхода — `WAV 32-bit float`.
+
+### Добавлено
+- **Smoke-test `tests/smoke.js`** — end-to-end проверка четырёх ключевых
+  pipeline'ов (PCM s16, FLAC 24-bit auto preserve, pcm_f32le auto preserve,
+  M4A AAC bitrate-from-source). Использует только built-in модули Node.js
+  и системные ffmpeg/ffprobe; пропускается с exit 0 если ffmpeg отсутствует.
+- **Предупреждения о snap sample rate** для MP3/Opus когда rate источника
+  не входит в поддерживаемый набор (`⚠ MP3 не поддерживает 96000 Hz →
+  snap к 48000 Hz`).
+- **Строка `WAV PCM 32-bit float` в таблице «Формат и качество выхода»**
+  README — отражает новое поведение для `pcm_f32le` источников.
+
+### Изменено
+- **LICENSE**: copyright «MusicForDance contributors» → «bivlked».
+- **`parseArgs()`**: `--help` теперь устанавливает флаг `helpRequested`
+  вместо inline `process.exit(0)`. Обрабатывается в `main()` до
+  `validateArgs()` — поведение для пользователя не меняется
+  (`node index.js --help` по-прежнему печатает справку и выходит с 0).
+
 ## [1.0.0] — 2026-04-30
 
 Первый публичный релиз.
@@ -46,3 +92,7 @@
   квантизации decoded-float-данных).
 - Длинный финальный тик: env=0 на самом последнем сэмпле (нет микро-щелчка
   на стыке с музыкой).
+
+[Unreleased]: https://github.com/bivlked/MusicForDance/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/bivlked/MusicForDance/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/bivlked/MusicForDance/releases/tag/v1.0.0
