@@ -147,9 +147,26 @@ function buildIntroWav({ sampleRate, channels, count = DEFAULT_TICKS }) {
 }
 
 // ─── PROCESS HELPERS ─────────────────────────────────────────────────
+// Активный ffmpeg/ffprobe child и временный intro-файл — для cleanup при SIGINT.
+// INVARIANT: pipeline выполняется СТРОГО последовательно (один файл за раз,
+// один процесс за раз). Если когда-нибудь добавится параллельная обработка
+// нескольких inputs / нескольких speeds — `activeChild` должен стать `Set<>`,
+// а cleanup — итерировать по всему набору.
+let activeChild = null;
+let activeIntroPath = null;
+
+function cleanupIntroSync() {
+    const p = activeIntroPath;
+    activeIntroPath = null;
+    if (p) {
+        try { fs.unlinkSync(p); } catch (_) { /* already gone */ }
+    }
+}
+
 function runProcess(cmd, args, { onStderr } = {}) {
     return new Promise((resolve, reject) => {
         const proc = spawn(cmd, args, { windowsHide: true });
+        activeChild = proc;
         let stdout = '';
         let stderr = '';
 
@@ -160,8 +177,12 @@ function runProcess(cmd, args, { onStderr } = {}) {
             if (onStderr) onStderr(s);
         });
 
-        proc.once('error', reject);
+        proc.once('error', err => {
+            if (activeChild === proc) activeChild = null;
+            reject(err);
+        });
         proc.once('close', (code, signal) => {
+            if (activeChild === proc) activeChild = null;
             if (code === 0) {
                 resolve({ stdout, stderr });
             } else {
@@ -874,6 +895,7 @@ async function processFile(inputPath, args) {
     const introBuf  = buildIntroWav({ sampleRate, channels, count: args.ticks });
     const introPath = uniqueIntroPath();
     fs.writeFileSync(introPath, introBuf);
+    activeIntroPath = introPath;
     console.log(`      ${(introBuf.length / 1024).toFixed(1)} KB → tmp`);
 
     try {
@@ -912,6 +934,7 @@ async function processFile(inputPath, args) {
         console.log(`\nГотово за ${fmtTime(Date.now() - t0)}. Файлы в: ${outDir}`);
     } finally {
         try { fs.unlinkSync(introPath); } catch (_) { /* file might be gone already */ }
+        if (activeIntroPath === introPath) activeIntroPath = null;
     }
 }
 
@@ -956,8 +979,39 @@ async function main() {
     }
 }
 
-process.once('SIGINT',  () => { console.error('\nПрервано пользователем'); process.exit(130); });
-process.once('SIGTERM', () => { process.exit(143); });
+// Graceful shutdown: kill активный ffmpeg/ffprobe, дождаться его close,
+// удалить временный intro-файл, потом exit. Идемпотентно через `shuttingDown`.
+// process.exit() ВНУТРИ setTimeout(SIGKILL) был бы недостижим — прежний код
+// делал `setTimeout` + сразу `process.exit`, таймаут не fire'ился. Здесь exit
+// отложен до child.close (или watchdog SIGKILL через 2с, что тоже триггерит close).
+let shuttingDown = false;
+function shutdown(signal, exitCode) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    if (signal === 'SIGINT') console.error('\nПрервано пользователем');
+
+    const child = activeChild;
+    if (!child) {
+        cleanupIntroSync();
+        process.exit(exitCode);
+        return;
+    }
+
+    const killer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch (_) { /* may already be dead */ }
+    }, 2000);
+    child.once('close', () => {
+        clearTimeout(killer);
+        cleanupIntroSync();
+        process.exit(exitCode);
+    });
+    try { child.kill('SIGTERM'); } catch (_) { /* may already be dead */ }
+}
+process.once('SIGINT',  () => shutdown('SIGINT', 130));
+process.once('SIGTERM', () => shutdown('SIGTERM', 143));
+// Final safety net: даже при необработанном пути выхода (uncaughtException и т.п.)
+// синхронно подчистим intro-файл из системного temp.
+process.once('exit', cleanupIntroSync);
 
 main().catch(err => {
     console.error(`\nОшибка: ${err.message}`);
