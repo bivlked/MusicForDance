@@ -241,7 +241,8 @@ async function probe(filePath) {
     };
 }
 
-function pcmCodecForBits(bits) {
+function pcmCodecForBits(bits, isFloat = false) {
+    if (isFloat && bits === 32) return 'pcm_f32le';
     switch (bits) {
         case 16: return 'pcm_s16le';
         case 24: return 'pcm_s24le';
@@ -313,17 +314,30 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
         return fallback;
     };
 
+    // Утилита: предупредить, если sample rate источника не поддерживается
+    // выходным кодеком и будет «снапнут» buildOutput'ом к ближайшему валидному.
+    const noteSnap = (codecLabel, snapFn) => {
+        const snapped = snapFn(meta.sampleRate);
+        if (snapped !== meta.sampleRate) {
+            warnings.push(`${codecLabel} не поддерживает ${meta.sampleRate} Hz → snap к ${snapped} Hz`);
+        }
+    };
+
     // Утилита: bit-depth для PCM-выхода.
     const pcmBitsForSource = () => {
         if (LOSSY_CODECS.has(meta.codec)) return 24;            // lossy → 24-bit
         return VALID_BITS.has(meta.bitsPerSample) ? meta.bitsPerSample : 24;
     };
 
-    // Принудительный WAV
+    // Принудительный WAV: сохраняем pcm_f32le для float-источников
+    // (иначе silent quantization 32f → 32i на пограничных значениях).
     if (formatOverride === 'wav') {
-        const bits = pcmBitsForSource();
-        return { kind: 'pcm', codec: pcmCodecForBits(bits), ext: 'wav',
-                 sampleFmt: null, label: `WAV ${bits}-bit`, warnings };
+        const bits   = pcmBitsForSource();
+        const isFlt  = (meta.codec === 'pcm_f32le');
+        const codec  = pcmCodecForBits(bits, isFlt);
+        const label  = isFlt ? 'WAV 32-bit float' : `WAV ${bits}-bit`;
+        return { kind: 'pcm', codec, ext: 'wav',
+                 sampleFmt: null, label, warnings };
     }
 
     // Принудительный MP3
@@ -331,6 +345,7 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
         const br = bitrateOverride || (meta.codec === 'mp3' && (meta.streamBitRate || meta.formatBitRate)
             ? `${Math.round((meta.streamBitRate || meta.formatBitRate) / 1000)}k`
             : '192k');
+        noteSnap('MP3', snapToMp3Rate);
         return {
             kind:   'lossy',
             codec:  'libmp3lame',
@@ -346,9 +361,12 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
     // Auto: подобрать по источнику.
     switch (meta.codec) {
         case 'pcm_s16le': case 'pcm_s24le': case 'pcm_s32le': case 'pcm_f32le': {
-            const bits = pcmBitsForSource();
-            return { kind: 'pcm', codec: pcmCodecForBits(bits), ext: 'wav',
-                     sampleFmt: null, label: `WAV ${bits}-bit`, warnings };
+            const isFlt = (meta.codec === 'pcm_f32le');
+            const bits  = pcmBitsForSource();
+            const codec = pcmCodecForBits(bits, isFlt);
+            const label = isFlt ? 'WAV 32-bit float' : `WAV ${bits}-bit`;
+            return { kind: 'pcm', codec, ext: 'wav',
+                     sampleFmt: null, label, warnings };
         }
         case 'flac': {
             // FLAC sample formats: только s16/s32. 24-bit хранится через
@@ -388,6 +406,7 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
         }
         case 'mp3': case 'mp2': case 'mp1': {
             const br = bitrateFromSource('192k');
+            noteSnap('MP3', snapToMp3Rate);
             return { kind: 'lossy', codec: 'libmp3lame', ext: 'mp3', bitrate: br,
                      sampleRateClamp: snapToMp3Rate, sampleFmt: null,
                      label: `MP3 ${br}`, warnings };
@@ -399,6 +418,7 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
         }
         case 'opus': {
             const br = bitrateFromSource('128k');
+            noteSnap('Opus', snapToOpusRate);
             return { kind: 'lossy', codec: 'libopus', ext: 'opus', bitrate: br,
                      sampleRateClamp: snapToOpusRate, sampleFmt: null,
                      label: `Opus ${br}`, warnings };
@@ -515,6 +535,7 @@ function parseArgs(argv) {
         bitrateOverride: null,       // например '320k'; null = взять из источника
         setupTarget:     null,
         force:           false,
+        helpRequested:   false,
     };
 
     // Возвращает значение для опции, бросая понятную ошибку при отсутствии или
@@ -586,8 +607,9 @@ function parseArgs(argv) {
                 break;
             case '-h':
             case '--help':
-                printHelp();
-                process.exit(0);
+                // Flag set; main() напечатает help и выйдет ДО validateArgs
+                // (нужно чтобы node index.js --help не падал на «не указан вход»).
+                out.helpRequested = true;
                 break;
             default:
                 if (a.startsWith('-')) {
@@ -947,6 +969,11 @@ async function main() {
         console.error(`Ошибка: ${err.message}\n`);
         printHelp();
         process.exit(1);
+    }
+
+    if (args.helpRequested) {
+        printHelp();
+        process.exit(0);
     }
 
     const validationError = validateArgs(args);
