@@ -174,30 +174,38 @@ function runProcess(cmd, args, { onStderr } = {}) {
 }
 
 async function probe(filePath) {
+    // -of json обязателен: и stream, и format содержат поле bit_rate. Плоский
+    // key=value parser silently выберет неправильный, а нам нужны оба
+    // (stream предпочтительнее, format — fallback для VBR AAC где stream=N/A).
     const { stdout } = await runProcess(FFPROBE, [
         '-v', 'error',
         '-select_streams', 'a:0',
-        '-show_entries', 'stream=sample_rate,channels,bits_per_sample,bits_per_raw_sample,codec_name,duration,bit_rate',
-        '-of', 'default=noprint_wrappers=1',
+        '-show_entries', 'stream=sample_rate,channels,bits_per_sample,bits_per_raw_sample,codec_name,duration,bit_rate:format=bit_rate',
+        '-of', 'json',
         filePath,
     ]);
 
-    const fields = {};
-    for (const line of stdout.split(/\r?\n/)) {
-        const m = line.match(/^(\w+)=(.*)$/);
-        if (m) fields[m[1]] = m[2];
+    let parsed;
+    try {
+        parsed = JSON.parse(stdout);
+    } catch (err) {
+        throw new Error(`ffprobe вернул невалидный JSON: ${err.message}`);
     }
 
-    const bps    = parseInt(fields.bits_per_sample, 10);
-    const bpsRaw = parseInt(fields.bits_per_raw_sample, 10);
+    const stream = (parsed.streams && parsed.streams[0]) || {};
+    const format = parsed.format || {};
+
+    const bps    = parseInt(stream.bits_per_sample, 10);
+    const bpsRaw = parseInt(stream.bits_per_raw_sample, 10);
     const bitsPerSample = (Number.isFinite(bps) && bps > 0)
         ? bps
         : (Number.isFinite(bpsRaw) && bpsRaw > 0 ? bpsRaw : 16);
 
-    const sampleRate = parseInt(fields.sample_rate, 10);
-    const channels   = parseInt(fields.channels, 10);
-    const duration   = parseFloat(fields.duration);
-    const bitRate    = parseInt(fields.bit_rate, 10);
+    const sampleRate = parseInt(stream.sample_rate, 10);
+    const channels   = parseInt(stream.channels, 10);
+    const duration   = parseFloat(stream.duration);
+    const streamBR   = parseInt(stream.bit_rate, 10);
+    const formatBR   = parseInt(format.bit_rate, 10);
 
     if (!Number.isFinite(sampleRate) || !Number.isFinite(channels)) {
         throw new Error('ffprobe не нашёл аудио-стрим в файле');
@@ -205,9 +213,10 @@ async function probe(filePath) {
 
     return {
         sampleRate, channels, bitsPerSample,
-        duration: Number.isFinite(duration) ? duration : null,
-        bitRate:  Number.isFinite(bitRate) && bitRate > 0 ? bitRate : null,
-        codec:    fields.codec_name || '',
+        duration:       Number.isFinite(duration) ? duration : null,
+        streamBitRate:  Number.isFinite(streamBR) && streamBR > 0 ? streamBR : null,
+        formatBitRate:  Number.isFinite(formatBR) && formatBR > 0 ? formatBR : null,
+        codec:          stream.codec_name || '',
     };
 }
 
@@ -267,10 +276,19 @@ function snapToOpusRate(rate) {
  * @param {string|null} bitrateOverride — например '320k', null = из источника
  */
 function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
-    // Утилита: bitrate из источника или fallback. Возвращает строку '192k' и т.д.
+    const warnings = [];
+
+    // Утилита: bitrate из источника или fallback. Chain: stream → format → default.
+    // Если попали на format-fallback — пишем warning, чтобы пользователь видел
+    // что bitrate взят из контейнера (типично для VBR AAC, где stream=N/A).
     const bitrateFromSource = (fallback) => {
         if (bitrateOverride) return bitrateOverride;
-        if (meta.bitRate) return `${Math.round(meta.bitRate / 1000)}k`;
+        if (meta.streamBitRate) return `${Math.round(meta.streamBitRate / 1000)}k`;
+        if (meta.formatBitRate) {
+            const br = `${Math.round(meta.formatBitRate / 1000)}k`;
+            warnings.push(`Bitrate из контейнера (stream=N/A): ${br}`);
+            return br;
+        }
         return fallback;
     };
 
@@ -283,13 +301,14 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
     // Принудительный WAV
     if (formatOverride === 'wav') {
         const bits = pcmBitsForSource();
-        return { kind: 'pcm', codec: pcmCodecForBits(bits), ext: 'wav', label: `WAV ${bits}-bit` };
+        return { kind: 'pcm', codec: pcmCodecForBits(bits), ext: 'wav',
+                 sampleFmt: null, label: `WAV ${bits}-bit`, warnings };
     }
 
     // Принудительный MP3
     if (formatOverride === 'mp3') {
-        const br = bitrateOverride || (meta.codec === 'mp3' && meta.bitRate
-            ? `${Math.round(meta.bitRate / 1000)}k`
+        const br = bitrateOverride || (meta.codec === 'mp3' && (meta.streamBitRate || meta.formatBitRate)
+            ? `${Math.round((meta.streamBitRate || meta.formatBitRate) / 1000)}k`
             : '192k');
         return {
             kind:   'lossy',
@@ -297,7 +316,9 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
             ext:    'mp3',
             bitrate: br,
             sampleRateClamp: snapToMp3Rate,
+            sampleFmt: null,
             label:  `MP3 ${br}`,
+            warnings,
         };
     }
 
@@ -305,44 +326,85 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
     switch (meta.codec) {
         case 'pcm_s16le': case 'pcm_s24le': case 'pcm_s32le': case 'pcm_f32le': {
             const bits = pcmBitsForSource();
-            return { kind: 'pcm', codec: pcmCodecForBits(bits), ext: 'wav', label: `WAV ${bits}-bit` };
+            return { kind: 'pcm', codec: pcmCodecForBits(bits), ext: 'wav',
+                     sampleFmt: null, label: `WAV ${bits}-bit`, warnings };
         }
-        case 'flac':
-            return { kind: 'lossless', codec: 'flac', ext: 'flac', label: `FLAC ${meta.bitsPerSample || 24}-bit` };
-        case 'alac':
-            return { kind: 'lossless', codec: 'alac', ext: 'm4a', label: `ALAC ${meta.bitsPerSample || 24}-bit` };
+        case 'flac': {
+            // FLAC sample formats: только s16/s32. 24-bit хранится через
+            // s32 + bits_per_raw_sample=24 (NOT s24 — такого формата у ffmpeg нет).
+            const srcBits = meta.bitsPerSample || 24;
+            const spec = { kind: 'lossless', codec: 'flac', ext: 'flac', warnings };
+            if (srcBits <= 16) {
+                spec.sampleFmt = 's16';
+                spec.label = 'FLAC 16-bit';
+            } else if (srcBits === 24) {
+                spec.sampleFmt = 's32';
+                spec.bitsPerRawSample = 24;
+                spec.label = 'FLAC 24-bit';
+            } else {
+                spec.sampleFmt = 's32';
+                spec.label = 'FLAC 32-bit';
+            }
+            return spec;
+        }
+        case 'alac': {
+            // ALAC encoder в ffmpeg принимает только planar форматы: s16p, s32p.
+            // 24-bit aналогично FLAC: s32p + bits_per_raw_sample=24.
+            const srcBits = meta.bitsPerSample || 24;
+            const spec = { kind: 'lossless', codec: 'alac', ext: 'm4a', warnings };
+            if (srcBits <= 16) {
+                spec.sampleFmt = 's16p';
+                spec.label = 'ALAC 16-bit';
+            } else if (srcBits === 24) {
+                spec.sampleFmt = 's32p';
+                spec.bitsPerRawSample = 24;
+                spec.label = 'ALAC 24-bit';
+            } else {
+                spec.sampleFmt = 's32p';
+                spec.label = 'ALAC 32-bit';
+            }
+            return spec;
+        }
         case 'mp3': case 'mp2': case 'mp1': {
             const br = bitrateFromSource('192k');
             return { kind: 'lossy', codec: 'libmp3lame', ext: 'mp3', bitrate: br,
-                     sampleRateClamp: snapToMp3Rate, label: `MP3 ${br}` };
+                     sampleRateClamp: snapToMp3Rate, sampleFmt: null,
+                     label: `MP3 ${br}`, warnings };
         }
         case 'aac': case 'aac_latm': {
             const br = bitrateFromSource('192k');
-            return { kind: 'lossy', codec: 'aac', ext: 'm4a', bitrate: br, label: `AAC ${br}` };
+            return { kind: 'lossy', codec: 'aac', ext: 'm4a', bitrate: br,
+                     sampleFmt: null, label: `AAC ${br}`, warnings };
         }
         case 'opus': {
             const br = bitrateFromSource('128k');
             return { kind: 'lossy', codec: 'libopus', ext: 'opus', bitrate: br,
-                     sampleRateClamp: snapToOpusRate, label: `Opus ${br}` };
+                     sampleRateClamp: snapToOpusRate, sampleFmt: null,
+                     label: `Opus ${br}`, warnings };
         }
         case 'vorbis': {
             const br = bitrateFromSource('192k');
-            return { kind: 'lossy', codec: 'libvorbis', ext: 'ogg', bitrate: br, label: `Vorbis ${br}` };
+            return { kind: 'lossy', codec: 'libvorbis', ext: 'ogg', bitrate: br,
+                     sampleFmt: null, label: `Vorbis ${br}`, warnings };
         }
         case 'ac3': {
             const br = bitrateFromSource('192k');
-            return { kind: 'lossy', codec: 'ac3', ext: 'ac3', bitrate: br, label: `AC3 ${br}` };
+            return { kind: 'lossy', codec: 'ac3', ext: 'ac3', bitrate: br,
+                     sampleFmt: null, label: `AC3 ${br}`, warnings };
         }
         case 'eac3': {
             const br = bitrateFromSource('192k');
-            return { kind: 'lossy', codec: 'eac3', ext: 'eac3', bitrate: br, label: `E-AC3 ${br}` };
+            return { kind: 'lossy', codec: 'eac3', ext: 'eac3', bitrate: br,
+                     sampleFmt: null, label: `E-AC3 ${br}`, warnings };
         }
         // Кодеки без encoder в gyan.dev ffmpeg (WMA, DTS) → fallback на WAV
         default: {
             const bits = pcmBitsForSource();
             return {
                 kind: 'pcm', codec: pcmCodecForBits(bits), ext: 'wav',
+                sampleFmt: null,
                 label: `WAV ${bits}-bit (fallback: нет encoder для «${meta.codec}»)`,
+                warnings,
             };
         }
     }
@@ -398,6 +460,16 @@ async function buildOutput({
 
     if (outputSpec.bitrate) {
         args.push('-b:a', outputSpec.bitrate);
+    }
+
+    // sampleFmt передаём только для FLAC/ALAC (PCM-кодек сам определяет формат
+    // именем; lossy энкодеры берут что им удобно из fltp).
+    if (outputSpec.sampleFmt) {
+        args.push('-sample_fmt', outputSpec.sampleFmt);
+    }
+    // 24-bit FLAC/ALAC: ffmpeg хранит s32, но кодирует только нижние 24 бита.
+    if (outputSpec.bitsPerRawSample) {
+        args.push('-bits_per_raw_sample', String(outputSpec.bitsPerRawSample));
     }
 
     const targetRate = outputSpec.sampleRateClamp
@@ -761,7 +833,8 @@ async function processFile(inputPath, args) {
     console.log(`\n[1/3] Анализ «${path.basename(inputPath)}»`);
     const meta = await probe(inputPath);
     const durStr = meta.duration !== null ? `${meta.duration.toFixed(2)} с` : 'неизвестна';
-    const brStr  = meta.bitRate ? `, ${Math.round(meta.bitRate / 1000)} kbps` : '';
+    const sourceBR = meta.streamBitRate || meta.formatBitRate;
+    const brStr  = sourceBR ? `, ${Math.round(sourceBR / 1000)} kbps` : '';
     console.log(`      ${meta.codec}, ${meta.sampleRate} Hz, ${meta.channels}ch, ${meta.bitsPerSample}-bit${brStr}, длительность ${durStr}`);
 
     let channels = meta.channels;
@@ -776,6 +849,9 @@ async function processFile(inputPath, args) {
     }
 
     const outputSpec = chooseOutputSpec(meta, args.formatOverride, args.bitrateOverride);
+    for (const w of outputSpec.warnings || []) {
+        console.log(`      ⚠ ${w}`);
+    }
     const outExt      = outputSpec.ext;
     const formatLabel = outputSpec.label;
 
