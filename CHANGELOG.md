@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-07-07
+
 Patch-релиз: исправления находок полного code-аудита от 2026-07-07 (внутренний аудит + независимое внешнее ревью, все находки подтверждены обоими).
 
 ### Исправлено
@@ -176,7 +178,8 @@ Patch-релиз: исправления находок code-аудита от 2
 - Длинный финальный тик: env=0 на самом последнем сэмпле (нет микро-щелчка
   на стыке с музыкой).
 
-[Unreleased]: https://github.com/bivlked/MusicForDance/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/bivlked/MusicForDance/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/bivlked/MusicForDance/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/bivlked/MusicForDance/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/bivlked/MusicForDance/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/bivlked/MusicForDance/releases/tag/v1.0.0
