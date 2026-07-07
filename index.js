@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * countdown-audio — Подготовка танцевальных треков с обратным отсчётом.
+ * MusicForDance — Подготовка танцевальных треков с обратным отсчётом.
  *
  * Self-contained CLI. Зависимости только runtime:
- *   • Node.js 18+
+ *   • Node.js 20+
  *   • ffmpeg 6+ собранный с --enable-librubberband (и --enable-libmp3lame для --mp3)
  *
  * Развёртывание на новый ПК — копируешь только этот файл, выполняешь:
- *   node index.js --setup C:\countdown-audio
+ *   node index.js --setup C:\Tools\MusicForDance
  *
  * Использование:
  *   node index.js <input> [<input2> ...] [опции]
@@ -35,6 +35,11 @@ const VALID_BITS          = new Set([16, 24, 32]);
 const HEADER_SIZE      = 44;
 const BITS_PER_SAMPLE  = 16;
 const BYTES_PER_SAMPLE = 2;
+
+// stderr дочернего процесса нужен только для диагностики (хвост в сообщении об
+// ошибке) и progress-каллбека — храним только хвост, иначе на многочасовом
+// файле progress-строки ffmpeg накопили бы десятки мегабайт в памяти.
+const STDERR_TAIL_LIMIT = 64 * 1024;
 
 // ─── WAV ENCODER ─────────────────────────────────────────────────────
 function encodeWavPcm16(samples, sampleRate, channels) {
@@ -154,10 +159,24 @@ function buildIntroWav({ sampleRate, channels, count = DEFAULT_TICKS }) {
 // а cleanup — итерировать по всему набору.
 let activeChild = null;
 let activeIntroPath = null;
+// ВРЕМЕННЫЙ выходной файл, который ffmpeg пишет ПРЯМО СЕЙЧАС. Каждая версия
+// сначала пишется во временное имя (`.tmp.<имя>`) и переименовывается в
+// финальное только после успешного завершения ffmpeg. Поэтому cleanup может
+// удалять этот путь безусловно: готовые файлы (и файлы прошлых запусков)
+// живут под финальными именами и здесь оказаться не могут.
+let activeOutputPath = null;
 
 function cleanupIntroSync() {
     const p = activeIntroPath;
     activeIntroPath = null;
+    if (p) {
+        try { fs.unlinkSync(p); } catch (_) { /* already gone */ }
+    }
+}
+
+function cleanupPartialOutputSync() {
+    const p = activeOutputPath;
+    activeOutputPath = null;
     if (p) {
         try { fs.unlinkSync(p); } catch (_) { /* already gone */ }
     }
@@ -174,6 +193,7 @@ function runProcess(cmd, args, { onStderr } = {}) {
         proc.stderr.on('data', d => {
             const s = d.toString('utf8');
             stderr += s;
+            if (stderr.length > STDERR_TAIL_LIMIT) stderr = stderr.slice(-STDERR_TAIL_LIMIT);
             if (onStderr) onStderr(s);
         });
 
@@ -265,8 +285,11 @@ function snapToMp3Rate(rate) {
     return best;
 }
 
-// Lossy декодеры: для них исходный bits_per_sample не значит ничего —
-// внутренний формат float; кодирование в 16-bit квантизировало бы лишний раз.
+// Кодеки, декодируемые во float: их bits_per_sample не описывает реальную
+// PCM-разрядность, поэтому при выводе в WAV берём 24-bit (кодирование в 16-bit
+// квантизировало бы лишний раз). Примечание: truehd и dts (профиль HD MA)
+// формально без потерь, но декодер всё равно отдаёт float, а 24-bit WAV
+// покрывает их фактическую разрядность — включены сюда сознательно.
 const LOSSY_CODECS = new Set([
     'mp3', 'mp2', 'mp1',
     'aac', 'aac_latm',
@@ -329,11 +352,11 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
         return VALID_BITS.has(meta.bitsPerSample) ? meta.bitsPerSample : 24;
     };
 
-    // Принудительный WAV: сохраняем pcm_f32le для float-источников
-    // (иначе silent quantization 32f → 32i на пограничных значениях).
+    // Принудительный WAV: сохраняем 32-bit float для ЛЮБЫХ float-источников
+    // (pcm_f32le/f32be/f64le/f64be) — иначе silent quantization float → int.
     if (formatOverride === 'wav') {
-        const bits   = pcmBitsForSource();
-        const isFlt  = (meta.codec === 'pcm_f32le');
+        const isFlt  = meta.codec.startsWith('pcm_f');
+        const bits   = isFlt ? 32 : pcmBitsForSource();
         const codec  = pcmCodecForBits(bits, isFlt);
         const label  = isFlt ? 'WAV 32-bit float' : `WAV ${bits}-bit`;
         return { kind: 'pcm', codec, ext: 'wav',
@@ -360,9 +383,15 @@ function chooseOutputSpec(meta, formatOverride, bitrateOverride) {
 
     // Auto: подобрать по источнику.
     switch (meta.codec) {
-        case 'pcm_s16le': case 'pcm_s24le': case 'pcm_s32le': case 'pcm_f32le': {
-            const isFlt = (meta.codec === 'pcm_f32le');
-            const bits  = pcmBitsForSource();
+        // Big-endian PCM (AIFF) выводим в LE WAV той же разрядности; float
+        // (f32/f64) сохраняем как 32-bit float — f64 в музыкальном материале
+        // избыточен, точности 32f хватает с запасом.
+        case 'pcm_s16le': case 'pcm_s24le': case 'pcm_s32le':
+        case 'pcm_s16be': case 'pcm_s24be': case 'pcm_s32be':
+        case 'pcm_f32le': case 'pcm_f32be':
+        case 'pcm_f64le': case 'pcm_f64be': {
+            const isFlt = meta.codec.startsWith('pcm_f');
+            const bits  = isFlt ? 32 : pcmBitsForSource();
             const codec = pcmCodecForBits(bits, isFlt);
             const label = isFlt ? 'WAV 32-bit float' : `WAV ${bits}-bit`;
             return { kind: 'pcm', codec, ext: 'wav',
@@ -568,11 +597,13 @@ function parseArgs(argv) {
                 break;
             case '--speeds': {
                 const raw = readValue(++i, '--speeds');
+                // trim: «1.0, 0.9» (пробел после запятой) — частый ввод, не ошибка.
                 out.speeds = raw.split(',').map(s => {
-                    if (!/^-?\d+(\.\d+)?$/.test(s)) {
+                    const v = s.trim();
+                    if (!/^-?\d+(\.\d+)?$/.test(v)) {
                         throw new Error(`--speeds: невалидное число «${s}»`);
                     }
-                    return parseFloat(s);
+                    return parseFloat(v);
                 });
                 break;
             }
@@ -593,6 +624,11 @@ function parseArgs(argv) {
                 const raw = readValue(++i, '--bitrate');
                 if (!/^\d+k?$/i.test(raw)) {
                     throw new Error(`--bitrate: ожидается «N» или «Nk» (получено: ${raw})`);
+                }
+                // «0k» ffmpeg молча проглатывает и кодек берёт СВОЙ дефолт —
+                // тихий сюрприз вместо ошибки. Отклоняем явно.
+                if (parseInt(raw, 10) === 0) {
+                    throw new Error(`--bitrate: значение должно быть больше нуля (получено: ${raw})`);
                 }
                 out.bitrateOverride = /k$/i.test(raw) ? raw.toLowerCase() : `${raw}k`;
                 break;
@@ -693,6 +729,7 @@ MusicForDance — подготовка танцевальных треков с 
                    качество и не менять формат непредсказуемо.
                    PCM/FLAC/ALAC сохраняют bit depth; MP3/AAC/Opus/Vorbis/AC3 —
                    bitrate; lossy → 24-bit при принудительном --wav.
+                   Исторические MP1/MP2 кодируются в современный MP3.
   --wav:           PCM WAV; bit depth = source (или 24-bit для lossy).
   --mp3:           libmp3lame; bitrate из источника (если MP3) или 192k;
                    sample rate снапится к ближайшему MP3-supported.
@@ -804,6 +841,25 @@ async function checkDependencies() {
         });
     }
 
+    // ffprobe — отдельный бинарник из того же пакета; probe() без него не
+    // работает. Проверяем независимо от ffmpeg: PATH может содержать только один.
+    try {
+        const { stdout, stderr } = await runProcess(FFPROBE, ['-hide_banner', '-version']);
+        const versionMatch = (stdout + stderr).match(/ffprobe version (\S+)/);
+        results.push({
+            name:   'ffprobe',
+            ok:     true,
+            detail: versionMatch ? versionMatch[1] : 'найден',
+        });
+    } catch (_err) {
+        results.push({
+            name:        'ffprobe',
+            ok:          false,
+            detail:      'не найден в PATH',
+            installHint: 'ffprobe входит в тот же пакет: winget install Gyan.FFmpeg',
+        });
+    }
+
     return results;
 }
 
@@ -866,7 +922,13 @@ async function runSetup(targetPath, { force = false } = {}) {
 }
 
 // ─── PROCESS ONE FILE ────────────────────────────────────────────────
-async function processFile(inputPath, args) {
+// writtenOutputs — Set путей, уже занятых предыдущими входами ЭТОГО запуска.
+// Ловит тихую перезапись: «a/track.mp3 b/track.mp3 --out-dir out» дал бы
+// одинаковые имена выходов, и второй файл молча затёр бы результаты первого.
+// На Windows пути сравниваем без учёта регистра (NTFS case-insensitive).
+const outputKey = p => process.platform === 'win32' ? p.toLowerCase() : p;
+
+async function processFile(inputPath, args, writtenOutputs) {
     const baseName = path.basename(inputPath, path.extname(inputPath));
     const outDir = args.outDir
         ? path.resolve(args.outDir)
@@ -911,6 +973,16 @@ async function processFile(inputPath, args) {
             throw new Error(`Дубликат имени выхода «${o.name}» (несколько скоростей округляются одинаково)`);
         }
         seenNames.add(o.name);
+
+        const fullPath = path.join(outDir, o.name);
+        const key = outputKey(fullPath);
+        if (writtenOutputs.has(key)) {
+            throw new Error(
+                `Выход «${fullPath}» уже создан для другого входного файла в этом запуске ` +
+                `(входы с одинаковыми именами?). Используйте разные имена или разные --out-dir.`
+            );
+        }
+        writtenOutputs.add(key);
     }
 
     console.log(`\n[2/3] Генерация intro (${args.ticks} тиков, ${sampleRate} Hz, ${channels === 2 ? 'stereo' : 'mono'})`);
@@ -928,14 +1000,21 @@ async function processFile(inputPath, args) {
         for (const o of outputs) {
             const { speed, tag, name: outName } = o;
             const outPath = path.join(outDir, outName);
+            // Пишем во временное имя, финальное появляется только после
+            // rename по успеху. Временное имя сохраняет расширение последним
+            // сегментом — ffmpeg выбирает muxer по расширению.
+            const tmpPath = path.join(outDir, `.tmp.${outName}`);
             const tStart  = Date.now();
 
             if (isTTY) process.stdout.write(`  • ${outName}`);
+            // Регистрируем временный файл ДО запуска ffmpeg: при SIGINT или
+            // падении ffmpeg недописанный файл будет удалён (shutdown / catch).
+            activeOutputPath = tmpPath;
             try {
                 await buildOutput({
                     introPath,
                     sourcePath:      inputPath,
-                    outputPath:      outPath,
+                    outputPath:      tmpPath,
                     tempo:           speed,
                     silenceThreshDb: args.silenceDb,
                     sampleRate,
@@ -943,12 +1022,15 @@ async function processFile(inputPath, args) {
                     outputSpec,
                     onProgress:      progressUpdater(tag + 'x'),
                 });
+                fs.renameSync(tmpPath, outPath);   // атомарная публикация результата
+                activeOutputPath = null;
                 const elapsed = fmtTime(Date.now() - tStart);
                 if (isTTY) process.stdout.write(`\r  ✓ ${outName}  (${elapsed})${ANSI_CLEAR_LINE}\n`);
                 else       console.log(`  ✓ ${outName}  (${elapsed})`);
             } catch (err) {
-                if (isTTY) process.stdout.write(`\r  ✗ ${outName}  ОШИБКА${ANSI_CLEAR_LINE}\n`);
-                else       console.error(`  ✗ ${outName}  ОШИБКА`);
+                cleanupPartialOutputSync();
+                if (isTTY) process.stdout.write(`\r  ✗ ${outName}  ОШИБКА (недописанный файл удалён)${ANSI_CLEAR_LINE}\n`);
+                else       console.error(`  ✗ ${outName}  ОШИБКА (недописанный файл удалён)`);
                 throw err;
             }
         }
@@ -989,19 +1071,27 @@ async function main() {
     }
 
     const resolved = args.inputs.map(p => path.resolve(p));
-    const missing  = resolved.filter(p => !fs.existsSync(p));
-    if (missing.length) {
-        console.error('Файлы не найдены:');
-        for (const p of missing) console.error(`  ${p}`);
+    const problems = [];
+    for (const p of resolved) {
+        if (!fs.existsSync(p)) {
+            problems.push(`не найден: ${p}`);
+        } else if (!fs.statSync(p).isFile()) {
+            problems.push(`это не файл (каталог?): ${p}`);
+        }
+    }
+    if (problems.length) {
+        console.error('Проблемы с входными файлами:');
+        for (const p of problems) console.error(`  ${p}`);
         process.exit(1);
     }
 
+    const writtenOutputs = new Set();
     if (resolved.length === 1) {
-        await processFile(resolved[0], args);
+        await processFile(resolved[0], args, writtenOutputs);
     } else {
         for (let i = 0; i < resolved.length; i++) {
             console.log(`\n═══ [${i + 1}/${resolved.length}] ${path.basename(resolved[i])} ═══`);
-            await processFile(resolved[i], args);
+            await processFile(resolved[i], args, writtenOutputs);
         }
     }
 }
@@ -1019,6 +1109,7 @@ function shutdown(signal, exitCode) {
 
     const child = activeChild;
     if (!child) {
+        cleanupPartialOutputSync();
         cleanupIntroSync();
         process.exit(exitCode);
         return;
@@ -1029,6 +1120,9 @@ function shutdown(signal, exitCode) {
     }, 2000);
     child.once('close', () => {
         clearTimeout(killer);
+        // Ждём close ПЕРЕД unlink: пока ffmpeg жив, Windows держит дескриптор
+        // выходного файла и unlinkSync получил бы EBUSY/EPERM.
+        cleanupPartialOutputSync();
         cleanupIntroSync();
         process.exit(exitCode);
     });
@@ -1037,8 +1131,11 @@ function shutdown(signal, exitCode) {
 process.once('SIGINT',  () => shutdown('SIGINT', 130));
 process.once('SIGTERM', () => shutdown('SIGTERM', 143));
 // Final safety net: даже при необработанном пути выхода (uncaughtException и т.п.)
-// синхронно подчистим intro-файл из системного temp.
-process.once('exit', cleanupIntroSync);
+// синхронно подчистим intro-файл и недописанный выход.
+process.once('exit', () => {
+    cleanupPartialOutputSync();
+    cleanupIntroSync();
+});
 
 main().catch(err => {
     console.error(`\nОшибка: ${err.message}`);

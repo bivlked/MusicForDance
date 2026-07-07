@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/bivlked/MusicForDance?label=версия&color=informational)](https://github.com/bivlked/MusicForDance/releases/latest)
-[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A518-brightgreen.svg)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
 [![ffmpeg](https://img.shields.io/badge/ffmpeg-%E2%89%A56%20%2B%20librubberband-orange.svg)](https://ffmpeg.org)
 [![Platform](https://img.shields.io/badge/платформа-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#установка)
 [![Last commit](https://img.shields.io/github/last-commit/bivlked/MusicForDance?label=обновлён)](https://github.com/bivlked/MusicForDance/commits/main)
@@ -37,7 +37,7 @@
 
 ## 🚀 Быстрый старт за 30 секунд
 
-> Перед началом нужны `Node.js` 18+ и `ffmpeg` — [инструкция по установке](#установка) (одна команда `winget`/`brew`/`apt`). Дальше — три команды и готово:
+> Перед началом нужны `Node.js` 20+ и `ffmpeg` — [инструкция по установке](#установка) (одна команда `winget`/`brew`/`apt`). Дальше — три команды и готово:
 
 ```powershell
 # 1. Скачать инструмент (Windows PowerShell):
@@ -62,7 +62,7 @@ node index.js "путь/к/Вашему треку.mp3"
 
 Программе нужно две вещи:
 
-1. **`Node.js` 18 или новее** — это среда, в которой запускается сам инструмент.
+1. **`Node.js` 20 или новее** (рекомендуется актуальная LTS-версия) — это среда, в которой запускается сам инструмент.
 2. **`ffmpeg` 6 или новее** с библиотеками `librubberband` (замедление с сохранением высоты тона) и `libmp3lame` (для записи `MP3`, нужно только если используете `--mp3`).
 
 ### Windows
@@ -270,7 +270,7 @@ ffmpeg -filters | grep rubberband      # macOS / Linux
 <details>
 <summary><b>Как остановить процесс, если я нажал Enter случайно?</b></summary>
 
-Нажмите <kbd>Ctrl</kbd>+<kbd>C</kbd> в окне терминала. Программа корректно остановит обработку, завершит дочерний процесс `ffmpeg` и удалит временные файлы. Это поведение исправлено в версии 1.0.1 — раньше при `Ctrl+C` мог оставаться «висящий» процесс `ffmpeg` в системе и временный файл в папке временных файлов операционной системы.
+Нажмите <kbd>Ctrl</kbd>+<kbd>C</kbd> в окне терминала. Программа корректно остановит обработку, завершит дочерний процесс `ffmpeg`, удалит временные файлы **и недописанный выходной файл** (добавлено в 1.0.3 — раньше на диске мог остаться обрезанный файл, который выглядел как готовый результат). Уже полностью собранные версии остаются на месте.
 
 </details>
 
@@ -283,7 +283,7 @@ ffmpeg -filters | grep rubberband      # macOS / Linux
 node tests/smoke.js
 ```
 
-Если выводит `✓ smoke OK (4/4 tests)` — всё установлено и работает. Если `ffmpeg` отсутствует, тест аккуратно пропускается с пояснением (без ошибки).
+Если выводит `✓ smoke OK (6/6 tests)` — всё установлено и работает. Если `ffmpeg` отсутствует, тест аккуратно пропускается с пояснением (без ошибки).
 
 </details>
 
@@ -329,7 +329,7 @@ node index.js "Ваш трек.flac" --silence-db -90
    node index.js --setup "C:\Tools\MusicForDance"
    ```
 
-3. В указанной папке появятся `index.js` + `run.bat` (для перетаскивания мышью на Windows). Программа также проверит, установлены ли `ffmpeg`, `librubberband`, `libmp3lame` и подскажет, что и как доставить, если чего-то не хватает.
+3. В указанной папке появятся `index.js` + `run.bat` (для перетаскивания мышью на Windows). Программа также проверит, установлены ли `ffmpeg`, `ffprobe`, `librubberband`, `libmp3lame` и подскажет, что и как доставить, если чего-то не хватает.
 
 Пример вывода:
 
@@ -343,6 +343,7 @@ node index.js "Ваш трек.flac" --silence-db -90
   ✓ ffmpeg — 8.1-full_build-www.gyan.dev
   ✓ librubberband filter
   ✓ libmp3lame encoder
+  ✓ ffprobe — 8.1-full_build-www.gyan.dev
 
 [setup] Готово. Использование на этом ПК:
   cd "C:\Tools\MusicForDance"

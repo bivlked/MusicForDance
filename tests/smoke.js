@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 /**
- * smoke.js — end-to-end проверка ключевых пайплайнов MusicForDance v1.0.1.
+ * smoke.js — end-to-end проверка ключевых пайплайнов MusicForDance.
  *
  * Контракт: только built-in модули Node.js + системный ffmpeg/ffprobe.
  * Запуск: `node tests/smoke.js` из корня репо.
  *
  * Проверяет:
  *   1. PCM s16 — базовый pipeline (intro + main, формат и тайминги).
- *   2. FLAC 24-bit — Phase 1 NEW-P1.1: sample_fmt=s32 + bits_per_raw_sample=24.
- *   3. pcm_f32le — Phase 3 NEW-P2.2: float сохраняется, нет 32f→32i quantize.
- *   4. M4A AAC — Phase 1 NEW-P1.2: bitrate берётся из источника, не дефолт 192k.
+ *   2. FLAC 24-bit — sample_fmt=s32 + bits_per_raw_sample=24 (v1.0.1).
+ *   3. pcm_f32le — float сохраняется, нет 32f→32i quantize (v1.0.1).
+ *   4. M4A AAC — bitrate берётся из источника, не дефолт 192k (v1.0.1).
+ *   5. Замедление 0.8× — ветка rubberband реально работает и растягивает
+ *      длительность (до v1.0.3 все тесты шли на 1.0×, где rubberband
+ *      не подключается — сломанное замедление осталось бы незамеченным).
+ *   6. --setup — e2e развёртывание: index.js копируется байт-в-байт,
+ *      сгенерированный run.bat совпадает с run.bat из репозитория
+ *      (ловит расхождение встроенной константы RUN_BAT_CONTENT с файлом).
  *
  * Если ffmpeg/ffprobe нет в PATH — печатает SKIP и выходит с code 0.
+ * Тест 5 отдельно пропускается, если ffmpeg собран без librubberband.
  */
 
 'use strict';
@@ -181,7 +188,7 @@ function test4_aacM4a() {
     const inputPath = path.join(TMP_DIR, 'in.m4a');
     // CBR 256k + 3с — детерминированный bitrate, заведомо удалённый от дефолта 192k.
     // (С `-q:a 4` source kbps плавает между ffmpeg-версиями и в редких случаях
-    // может оказаться ~192, делая anti-regression check бесполезным — Codex M2.)
+    // может оказаться ~192, делая anti-regression check бесполезным — находка M2 внешнего аудита.)
     synthFixture(inputPath, {
         codec: 'aac', bitrate: '256k',
         sampleRate: 44100, channels: 2, durationSec: 3,
@@ -231,7 +238,7 @@ function test4_aacM4a() {
         x => x !== 192,
         `!== 192 (source=${srcKbps}, default=192)`);
 
-    // Дополнительный output-side sanity (Codex M1): ffmpeg aac encoder для
+    // Дополнительный output-side sanity (находка M1 внешнего аудита): ffmpeg aac encoder для
     // pure sine выдаёт ниже target bitrate (rate-distortion), но точно НЕ
     // должен болтаться на ~32k или внутри ~190..194 (то была бы регрессия
     // на дефолт 192k без чтения источника). Допускаем [40k .. srcKbps*1.3].
@@ -245,6 +252,54 @@ function test4_aacM4a() {
     check('output bit_rate sane', outKbps,
         x => x >= 40 && x <= Math.round(srcKbps * 1.3),
         `[40 .. ${Math.round(srcKbps * 1.3)}] kbps (encoder rate-distortion для pure sine)`);
+}
+
+function test5_slowdown() {
+    // Замедление требует librubberband. ffmpeg без него — не провал теста,
+    // а ограничение окружения: печатаем SKIP (основной сценарий инструмента
+    // на такой сборке в принципе не работает, но smoke не должен врать FAIL).
+    const filters = run(FFMPEG, ['-hide_banner', '-filters']).stdout;
+    if (!/ rubberband\s/.test(filters)) {
+        console.log('    ~ SKIP: ffmpeg собран без librubberband');
+        return;
+    }
+
+    const inputPath = path.join(TMP_DIR, 'in_slow.wav');
+    synthFixture(inputPath, { codec: 'pcm_s16le', sampleRate: 44100, channels: 1, durationSec: 4 });
+
+    runCli(inputPath, ['--speeds', '0.8', '--ticks', '3']);
+
+    const outPath = path.join(TMP_DIR, expectedOutputName(inputPath, 0.8, 'wav'));
+    if (!fs.existsSync(outPath)) throw new Error(`выход не создан: ${outPath}`);
+
+    const probe = ffprobeJson(outPath);
+    const dur   = parseFloat(probe.format.duration);
+    // intro 3с + main 4с/0.8 = 3 + 5 = 8с. Допуск ±0.3с покрывает
+    // блочную природу time-stretching (rubberband работает окнами).
+    check('duration', dur, x => approxEq(x, 8.0, 0.3), '≈ 8.0 ± 0.3с (3с intro + 4с/0.8)');
+    check('codec', probe.streams[0].codec_name, x => x === 'pcm_s16le', 'pcm_s16le');
+}
+
+function test6_setup() {
+    const setupDir = path.join(TMP_DIR, 'setup_target');
+    const r = run(NODE, [CLI, '--setup', setupDir]);
+    // Код 2 = «развёрнуто, но не все зависимости найдены» (например, ffmpeg
+    // без libmp3lame): файлы при этом уже скопированы, паритет проверяем.
+    if (r.code !== 0 && r.code !== 2) {
+        throw new Error(`--setup завершился с кодом ${r.code}:\nSTDOUT:\n${r.stdout.slice(-500)}\nSTDERR:\n${r.stderr.slice(-500)}`);
+    }
+
+    const deployedIndex = fs.readFileSync(path.join(setupDir, 'index.js'));
+    const sourceIndex   = fs.readFileSync(CLI);
+    check('index.js скопирован байт-в-байт', deployedIndex.equals(sourceIndex), x => x === true, 'true');
+
+    // Нормализуем CRLF/LF: git на Windows может хранить файлы с разными
+    // окончаниями строк, содержательно сравниваем текст.
+    const norm = s => s.replace(/\r\n/g, '\n');
+    const deployedBat = norm(fs.readFileSync(path.join(setupDir, 'run.bat'), 'utf8'));
+    const repoBat     = norm(fs.readFileSync(path.join(ROOT, 'run.bat'), 'utf8'));
+    check('run.bat == репозиторный run.bat', deployedBat === repoBat, x => x === true,
+        'true (RUN_BAT_CONTENT в index.js разошёлся с run.bat в репо?)');
 }
 
 // ─── MAIN ────────────────────────────────────────────────────────────
@@ -266,10 +321,12 @@ function main() {
     }
 
     try {
-        runTest('1/4 PCM s16 baseline (intro+main timing, format)', test1_pcmS16);
-        runTest('2/4 FLAC 24-bit auto preserve (Phase 1 NEW-P1.1)', test2_flac24);
-        runTest('3/4 pcm_f32le preserve (Phase 3 NEW-P2.2)',          test3_pcmF32le);
-        runTest('4/4 M4A AAC bitrate from source (Phase 1 NEW-P1.2)', test4_aacM4a);
+        runTest('1/6 PCM s16 baseline (intro+main timing, format)', test1_pcmS16);
+        runTest('2/6 FLAC 24-bit auto preserve',                    test2_flac24);
+        runTest('3/6 pcm_f32le preserve',                           test3_pcmF32le);
+        runTest('4/6 M4A AAC bitrate from source',                  test4_aacM4a);
+        runTest('5/6 slowdown 0.8x via rubberband',                 test5_slowdown);
+        runTest('6/6 --setup deploy + run.bat parity',              test6_setup);
     } finally {
         cleanup();
     }
