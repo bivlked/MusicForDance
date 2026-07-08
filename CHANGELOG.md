@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-08
+
 ### Добавлено
 - **Флаг `--no-intro`** (синоним `--no-ticks`) — создаёт версии на всех
   скоростях **без** обратного отсчёта в начале: просто замедленные копии
@@ -184,7 +186,8 @@ Patch-релиз: исправления находок code-аудита от 2
 - Длинный финальный тик: env=0 на самом последнем сэмпле (нет микро-щелчка
   на стыке с музыкой).
 
-[Unreleased]: https://github.com/bivlked/MusicForDance/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/bivlked/MusicForDance/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/bivlked/MusicForDance/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/bivlked/MusicForDance/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/bivlked/MusicForDance/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/bivlked/MusicForDance/compare/v1.0.0...v1.0.1
