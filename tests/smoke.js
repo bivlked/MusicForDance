@@ -302,6 +302,35 @@ function test6_setup() {
         'true (RUN_BAT_CONTENT в index.js разошёлся с run.bat в репо?)');
 }
 
+function test7_noIntro() {
+    const inputPath = path.join(TMP_DIR, 'in_nointro.wav');
+    // pure sine, без ведущей тишины — silenceremove ничего не срежет,
+    // поэтому длительность выхода = длительность источника (интро отсутствует).
+    synthFixture(inputPath, { codec: 'pcm_s16le', sampleRate: 44100, channels: 2, durationSec: 3 });
+
+    const hasRubberband = / rubberband\s/.test(run(FFMPEG, ['-hide_banner', '-filters']).stdout);
+    // 1.0x проверяем всегда; 0.8x (ветка rubberband без интро) — только если фильтр есть.
+    const speeds = hasRubberband ? '1.0,0.8' : '1.0';
+    runCli(inputPath, ['--no-intro', '--speeds', speeds]);
+
+    // 1.0x: без интро длительность = источник (~3с), а не источник+гудок (~8с как в test1).
+    const out10 = path.join(TMP_DIR, expectedOutputName(inputPath, 1.0, 'wav'));
+    if (!fs.existsSync(out10)) throw new Error(`выход не создан: ${out10}`);
+    const p10 = ffprobeJson(out10);
+    check('1.0x duration', parseFloat(p10.format.duration), x => approxEq(x, 3.0, 0.15), '≈ 3.0 ± 0.15с (источник, без интро)');
+    check('1.0x codec', p10.streams[0].codec_name, x => x === 'pcm_s16le', 'pcm_s16le');
+
+    // 0.8x: замедление без интро → 3с / 0.8 = 3.75с (проверяет rubberband в no-intro ветке).
+    if (hasRubberband) {
+        const out08 = path.join(TMP_DIR, expectedOutputName(inputPath, 0.8, 'wav'));
+        if (!fs.existsSync(out08)) throw new Error(`выход не создан: ${out08}`);
+        const dur08 = parseFloat(ffprobeJson(out08).format.duration);
+        check('0.8x duration', dur08, x => approxEq(x, 3.75, 0.2), '≈ 3.75 ± 0.2с (3с / 0.8, без интро)');
+    } else {
+        console.log('    ~ 0.8x SKIP: ffmpeg собран без librubberband');
+    }
+}
+
 // ─── MAIN ────────────────────────────────────────────────────────────
 function cleanup() {
     for (const p of cleanupTargets) {
@@ -321,12 +350,13 @@ function main() {
     }
 
     try {
-        runTest('1/6 PCM s16 baseline (intro+main timing, format)', test1_pcmS16);
-        runTest('2/6 FLAC 24-bit auto preserve',                    test2_flac24);
-        runTest('3/6 pcm_f32le preserve',                           test3_pcmF32le);
-        runTest('4/6 M4A AAC bitrate from source',                  test4_aacM4a);
-        runTest('5/6 slowdown 0.8x via rubberband',                 test5_slowdown);
-        runTest('6/6 --setup deploy + run.bat parity',              test6_setup);
+        runTest('1/7 PCM s16 baseline (intro+main timing, format)', test1_pcmS16);
+        runTest('2/7 FLAC 24-bit auto preserve',                    test2_flac24);
+        runTest('3/7 pcm_f32le preserve',                           test3_pcmF32le);
+        runTest('4/7 M4A AAC bitrate from source',                  test4_aacM4a);
+        runTest('5/7 slowdown 0.8x via rubberband',                 test5_slowdown);
+        runTest('6/7 --setup deploy + run.bat parity',              test6_setup);
+        runTest('7/7 --no-intro (no countdown, source duration)',   test7_noIntro);
     } finally {
         cleanup();
     }

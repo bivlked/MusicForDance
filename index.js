@@ -488,11 +488,14 @@ function channelLayoutName(channels) {
 
 // Главный pipeline: intro + source → silenceremove → [rubberband] → concat → output.
 // Один процесс ffmpeg на каждую версию, без промежуточных файлов на диске.
+// noIntro=true: гудок не генерируется и не склеивается — только замедлённая
+// (и обрезанная по тишине) копия источника.
 async function buildOutput({
     introPath, sourcePath, outputPath,
     tempo, silenceThreshDb, sampleRate, channels,
     outputSpec,
     onProgress,
+    noIntro = false,
 }) {
     const layout = channelLayoutName(channels);
 
@@ -505,28 +508,34 @@ async function buildOutput({
     if (Math.abs(tempo - 1.0) > 1e-6) {
         sourceFilters.push(`rubberband=tempo=${tempo}:pitch=1.0`);
     }
-    const formatFilter = `aformat=sample_fmts=fltp:sample_rates=${sampleRate}:channel_layouts=${layout}`;
-    sourceFilters.push(formatFilter);
-    // asetpts=N/SR/TB — сбрасываем PTS на основе sample-counter, чтобы concat
-    // получал стримы с timestamp 0 (защита от MP3 edit-list / encoder delay).
-    sourceFilters.push('asetpts=N/SR/TB');
 
-    const filterComplex = [
-        `[0:a]${formatFilter},asetpts=N/SR/TB[intro]`,
-        `[1:a]${sourceFilters.join(',')}[main]`,
-        `[intro][main]concat=n=2:v=0:a=1[out]`,
-    ].join(';');
+    const args = ['-y', '-hide_banner', '-nostdin'];
 
-    const args = [
-        '-y',
-        '-hide_banner',
-        '-nostdin',
-        '-i', introPath,
-        '-i', sourcePath,
-        '-filter_complex', filterComplex,
-        '-map', '[out]',
-        '-c:a', outputSpec.codec,
-    ];
+    if (noIntro) {
+        // Один вход, обработка источника напрямую в выход. silenceremove
+        // (обрезка ведущей тишины для плотного старта) и rubberband сохраняются;
+        // выпадает только генерация и склейка гудка. aformat/asetpts здесь не
+        // нужны — без concat формат задаёт кодек, а частоту/каналы -ar/-ac.
+        args.push('-i', sourcePath, '-af', sourceFilters.join(','));
+    } else {
+        // Оба потока приводим к общему формату (aformat) и склеиваем (concat).
+        const formatFilter = `aformat=sample_fmts=fltp:sample_rates=${sampleRate}:channel_layouts=${layout}`;
+        sourceFilters.push(formatFilter);
+        // asetpts=N/SR/TB — сбрасываем PTS на основе sample-counter, чтобы concat
+        // получал стримы с timestamp 0 (защита от MP3 edit-list / encoder delay).
+        sourceFilters.push('asetpts=N/SR/TB');
+
+        const filterComplex = [
+            `[0:a]${formatFilter},asetpts=N/SR/TB[intro]`,
+            `[1:a]${sourceFilters.join(',')}[main]`,
+            `[intro][main]concat=n=2:v=0:a=1[out]`,
+        ].join(';');
+
+        args.push('-i', introPath, '-i', sourcePath,
+                  '-filter_complex', filterComplex, '-map', '[out]');
+    }
+
+    args.push('-c:a', outputSpec.codec);
 
     if (outputSpec.bitrate) {
         args.push('-b:a', outputSpec.bitrate);
@@ -564,6 +573,7 @@ function parseArgs(argv) {
         bitrateOverride: null,       // например '320k'; null = взять из источника
         setupTarget:     null,
         force:           false,
+        noIntro:         false,      // true = без обратного отсчёта в начале
         helpRequested:   false,
     };
 
@@ -633,6 +643,10 @@ function parseArgs(argv) {
                 out.bitrateOverride = /k$/i.test(raw) ? raw.toLowerCase() : `${raw}k`;
                 break;
             }
+            case '--no-intro':
+            case '--no-ticks':
+                out.noIntro = true;
+                break;
             case '--setup':
             case '-setup':
                 out.setupTarget = readValue(++i, '--setup');
@@ -665,7 +679,8 @@ function validateArgs(args) {
     if (args.inputs.length === 0) {
         return 'не указан входной аудиофайл';
     }
-    if (!Number.isInteger(args.ticks) || args.ticks < 1 || args.ticks > 20) {
+    // При --no-intro значение --ticks не используется, диапазон не проверяем.
+    if (!args.noIntro && (!Number.isInteger(args.ticks) || args.ticks < 1 || args.ticks > 20)) {
         return `--ticks должен быть целым 1..20 (получено: ${args.ticks})`;
     }
     if (!Number.isFinite(args.silenceDb) || args.silenceDb >= 0 || args.silenceDb < -120) {
@@ -691,6 +706,9 @@ MusicForDance — подготовка танцевальных треков с 
 ОПЦИИ:
   --out-dir <path>     Папка для результатов (default: рядом с источником)
   --ticks <N>          Сколько тиков в отсчёте (default: 5; 1..20)
+  --no-intro           Без обратного отсчёта: только замедленные копии трека.
+                       Обрезка ведущей тишины сохраняется (см. --silence-db),
+                       значение --ticks игнорируется
   --silence-db <dB>    Порог тишины для обрезки в начале (default: -50)
   --speeds <list>      Список скоростей через запятую (default: 1.0,0.9,0.8,0.7)
   --mp3                Принудительно MP3 (default bitrate 192k или из источника)
@@ -714,6 +732,7 @@ MusicForDance — подготовка танцевальных треков с 
   node index.js "track.wav" --mp3              # → mp3 192k
   node index.js "track.mp3" --bitrate 320k     # → mp3 320k
   node index.js "track.wav" --ticks 4 --speeds 1.0,0.85,0.7
+  node index.js "track.flac" --no-intro           # → копии без отсчёта
   node index.js a.wav b.mp3 c.flac --out-dir ./output
   node index.js --setup C:\\Tools\\MusicForDance
 
@@ -935,7 +954,8 @@ async function processFile(inputPath, args, writtenOutputs) {
         : path.dirname(inputPath);
     fs.mkdirSync(outDir, { recursive: true });
 
-    console.log(`\n[1/3] Анализ «${path.basename(inputPath)}»`);
+    const totalSteps = args.noIntro ? 2 : 3;
+    console.log(`\n[1/${totalSteps}] Анализ «${path.basename(inputPath)}»`);
     const meta = await probe(inputPath);
     const durStr = meta.duration !== null ? `${meta.duration.toFixed(2)} с` : 'неизвестна';
     const sourceBR = meta.streamBitRate || meta.formatBitRate;
@@ -985,15 +1005,21 @@ async function processFile(inputPath, args, writtenOutputs) {
         writtenOutputs.add(key);
     }
 
-    console.log(`\n[2/3] Генерация intro (${args.ticks} тиков, ${sampleRate} Hz, ${channels === 2 ? 'stereo' : 'mono'})`);
-    const introBuf  = buildIntroWav({ sampleRate, channels, count: args.ticks });
-    const introPath = uniqueIntroPath();
-    fs.writeFileSync(introPath, introBuf);
-    activeIntroPath = introPath;
-    console.log(`      ${(introBuf.length / 1024).toFixed(1)} KB → tmp`);
+    // Без --no-intro генерируем гудок; иначе временного intro-файла нет вовсе.
+    let introPath = null;
+    if (!args.noIntro) {
+        console.log(`\n[2/${totalSteps}] Генерация intro (${args.ticks} тиков, ${sampleRate} Hz, ${channels === 2 ? 'stereo' : 'mono'})`);
+        const introBuf = buildIntroWav({ sampleRate, channels, count: args.ticks });
+        introPath = uniqueIntroPath();
+        fs.writeFileSync(introPath, introBuf);
+        activeIntroPath = introPath;
+        console.log(`      ${(introBuf.length / 1024).toFixed(1)} KB → tmp`);
+    }
 
     try {
-        console.log(`\n[3/3] Сборка ${args.speeds.length} версий (${formatLabel})`);
+        const buildStep = args.noIntro ? 2 : 3;
+        const introNote = args.noIntro ? ', без гудка' : '';
+        console.log(`\n[${buildStep}/${totalSteps}] Сборка ${args.speeds.length} версий (${formatLabel}${introNote})`);
         const t0    = Date.now();
         const isTTY = process.stdout.isTTY;
 
@@ -1021,6 +1047,7 @@ async function processFile(inputPath, args, writtenOutputs) {
                     channels,
                     outputSpec,
                     onProgress:      progressUpdater(tag + 'x'),
+                    noIntro:         args.noIntro,
                 });
                 fs.renameSync(tmpPath, outPath);   // атомарная публикация результата
                 activeOutputPath = null;
@@ -1037,8 +1064,10 @@ async function processFile(inputPath, args, writtenOutputs) {
 
         console.log(`\nГотово за ${fmtTime(Date.now() - t0)}. Файлы в: ${outDir}`);
     } finally {
-        try { fs.unlinkSync(introPath); } catch (_) { /* file might be gone already */ }
-        if (activeIntroPath === introPath) activeIntroPath = null;
+        if (introPath) {
+            try { fs.unlinkSync(introPath); } catch (_) { /* file might be gone already */ }
+            if (activeIntroPath === introPath) activeIntroPath = null;
+        }
     }
 }
 
