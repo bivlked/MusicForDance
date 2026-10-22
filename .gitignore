@@ -20,7 +20,7 @@ $RECYCLE.BIN/
 *~
 .history/
 
-# Claude Code (per-machine config, not for repo)
+# Local per-machine settings (not for repo)
 .claude/
 CLAUDE.local.md
 
